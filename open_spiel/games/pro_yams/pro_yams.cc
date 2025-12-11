@@ -442,5 +442,30 @@ std::unique_ptr<State> ProYamsState::Clone() const {
   return std::unique_ptr<State>(new ProYamsState(*this));
 }
 
+namespace {
+// Game Definition
+const GameType kGameType{
+    /*short_name=*/"pro_yams",
+    /*long_name=*/"Pro Yams",
+    GameType::Dynamics::kSequential,
+    GameType::ChanceMode::kExplicitStochastic,
+    GameType::Information::kPerfectInformation,
+    GameType::Utility::kZeroSum,
+    GameType::RewardModel::kTerminal,
+    /*max_num_players=*/2,
+    /*min_num_players=*/2,
+    /*provides_information_state_string=*/true,
+    /*provides_information_state_tensor=*/false,
+    /*provides_observation_string=*/true,
+    /*provides_observation_tensor=*/true,
+    /*parameter_specification=*/{} 
+};
+
+std::shared_ptr<const Game> Factory(const GameParameters& params) {
+  return std::shared_ptr<const Game>(new ProYamsGame(params));
+}
+
+REGISTER_SPIEL_GAME(kGameType, Factory);
+}  // namespace
 }  // namespace pro_yams
 }  // namespace open_spiel
