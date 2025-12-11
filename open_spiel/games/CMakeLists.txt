@@ -172,6 +172,8 @@ set(GAME_SOURCES
   pig/pig.cc
   pig/pig.h
   pokerkit_wrapper/pokerkit_wrapper_struct.h
+  pro_yams/pro_yams.cc
+  pro_yams/pro_yams.h
   repeated_pokerkit/repeated_pokerkit_struct.h
   quoridor/quoridor.cc
   quoridor/quoridor.h
@@ -622,6 +624,10 @@ add_test(pig_test pig_test)
 add_executable(pokerkit_wrapper_struct_test pokerkit_wrapper/pokerkit_wrapper_struct_test.cc ${OPEN_SPIEL_OBJECTS}
                $<TARGET_OBJECTS:tests>)
 add_test(pokerkit_wrapper_struct_test pokerkit_wrapper_struct_test)
+
+add_executable(pro_yams_test pro_yams/pro_yams_test.cc ${OPEN_SPIEL_OBJECTS}
+               $<TARGET_OBJECTS:tests>)
+add_test(pro_yams_test pro_yams_test)
 
 add_executable(repeated_pokerkit_struct_test repeated_pokerkit/repeated_pokerkit_struct_test.cc ${OPEN_SPIEL_OBJECTS}
                $<TARGET_OBJECTS:tests>)
