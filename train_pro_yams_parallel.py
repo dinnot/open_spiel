@@ -13,13 +13,23 @@ from open_spiel.python.pytorch import dqn
 # --- Configuration ---
 GAME_NAME = "pro_yams"
 NUM_TRAIN_STEPS = 500_000 
-NUM_ENVS = 70             # 70 Processes
+NUM_ENVS = 70             
+
+# --- ULTRA CONFIG FOR RTX 5080 ---
+# Massive capacity to learn complex probability mappings
+HIDDEN_LAYERS = [2048, 1024, 1024, 1024, 512] 
+
+# 5080 loves large batches. This stabilizes the gradient for the big network.
+BATCH_SIZE = 1024          
+
+# Larger buffer so the big brain doesn't memorize just the recent games
+REPLAY_BUFFER_CAPACITY = 500_000 
+
 LEARN_EVERY = 4           
 EVAL_EVERY = 1000         
 SAVE_EVERY = 10_000
 OUTPUT_DIR = "/tmp/pro_yams_dqn_parallel"
-HIDDEN_LAYERS = [512, 256, 128]
-EPSILON_DECAY = 5_000_000 
+EPSILON_DECAY = 5_000_000
 
 # --- Multiprocessing Worker ---
 def worker(rank, pipe, game_name):
@@ -113,22 +123,35 @@ def get_actions_batch(agent, info_states, legal_actions_lists, device, is_evalua
     return actions
 
 def load_checkpoint(agents, output_dir):
-    if not os.path.exists(output_dir): return 0
+    if not os.path.exists(output_dir): 
+        return 0
+    
+    # 1. Find the latest step based only on 'agent0' files (the Winner)
     files = os.listdir(output_dir)
     steps = []
     for f in files:
         match = re.match(r"agent0_step(\d+).pt", f)
-        if match: steps.append(int(match.group(1)))
+        if match: 
+            steps.append(int(match.group(1)))
     
-    if not steps: return 0
+    if not steps: 
+        return 0
+    
     latest_step = max(steps)
-    print(f"🔄 Found checkpoint at Step {latest_step}. Resuming...")
+    print(f"🔄 Found checkpoint at Step {latest_step}. Loading Agent 0 into Shared Brain...")
 
-    for idx, agent in enumerate(agents):
-        path = os.path.join(output_dir, f"agent{idx}_step{latest_step}.pt")
-        if os.path.exists(path):
-            agent.load(path)
-            agent._step_counter = latest_step * NUM_ENVS
+    # 2. Load only Agent 0's file
+    # Since agents[0] and agents[1] are the SAME object, loading into agents[0] updates both.
+    path = os.path.join(output_dir, f"agent0_step{latest_step}.pt")
+    
+    if os.path.exists(path):
+        agents[0].load(path)
+        # Restore epsilon decay progress
+        agents[0]._step_counter = latest_step * NUM_ENVS
+    else:
+        print(f"⚠️ Critical: Could not find checkpoint {path}")
+        return 0
+            
     return latest_step
 
 def main():
@@ -148,27 +171,27 @@ def main():
     print(f"State Size: {info_state_size}")
     print(f"Num Actions: {num_actions}")
 
-    agents = [
-        dqn.DQN(
-            player_id=idx,
-            state_representation_size=info_state_size,
-            num_actions=num_actions,
-            hidden_layers_sizes=HIDDEN_LAYERS,
-            replay_buffer_capacity=200_000,
-            batch_size=512,
-            learning_rate=0.00005, 
-            learn_every=1,
-            epsilon_decay_duration=EPSILON_DECAY,
-            epsilon_start=1.0,
-            epsilon_end=0.05,
-            loss_str="huber"
-        )
-        for idx in range(2)
-    ]
-
-    for agent in agents:
-        agent._q_network.to(device)
-        agent._target_q_network.to(device)
+    shared_agent = dqn.DQN(
+        player_id=0, 
+        state_representation_size=info_state_size,
+        num_actions=num_actions,
+        hidden_layers_sizes=HIDDEN_LAYERS,
+        replay_buffer_capacity=REPLAY_BUFFER_CAPACITY,
+        batch_size=BATCH_SIZE,
+        learning_rate=0.00005, 
+        learn_every=1,
+        epsilon_decay_duration=EPSILON_DECAY,
+        epsilon_start=1.0,
+        epsilon_end=0.05,
+        loss_str="huber"
+    )
+    
+    # Move to GPU
+    shared_agent._q_network.to(device)
+    shared_agent._target_q_network.to(device)
+    
+    # Both agents in the list point to the SAME object
+    agents = [shared_agent, shared_agent]
 
     if not os.path.exists(OUTPUT_DIR): os.makedirs(OUTPUT_DIR)
     start_step = load_checkpoint(agents, OUTPUT_DIR)
@@ -261,21 +284,22 @@ def main():
             # --- STEP ---
             next_time_steps, rewards, dones, unreset_time_steps = envs.step(step_outputs, reset_if_done=True)
 
-            # --- ACCUMULATE & TERMINATE ---
+            # --- ACCUMULATE & TERMINATE (ABSOLUTE REWARD FIX) ---
             for i in range(NUM_ENVS):
-                # 1. Accumulate Rewards
-                # If P0 has a pending move, add any reward P0 got this step
+                # Get rewards for this step
+                r_p0 = rewards[i][0] if rewards[i] else 0.0
+                r_p1 = rewards[i][1] if rewards[i] else 0.0
+
+                # 1. Accumulate ABSOLUTE Rewards
                 if pending_transitions[i][0] is not None:
-                    r = rewards[i][0] if rewards[i] else 0.0
                     if not dones[i]:
-                        pending_transitions[i][0][2] += r
+                        pending_transitions[i][0][2] += r_p0 
 
                 if pending_transitions[i][1] is not None:
-                    r = rewards[i][1] if rewards[i] else 0.0
                     if not dones[i]:
-                        pending_transitions[i][1][2] += r
+                        pending_transitions[i][1][2] += r_p1
 
-                # 2. Handle Terminal State (Game Over)
+                # 2. Handle Terminal State
                 if dones[i]:
                     final_r_p0 = unreset_time_steps[i].rewards[0] if unreset_time_steps[i].rewards else 0.0
                     final_r_p1 = unreset_time_steps[i].rewards[1] if unreset_time_steps[i].rewards else 0.0
@@ -286,9 +310,11 @@ def main():
                     if pending_transitions[i][0] is not None:
                         old_obs, old_act, acc_reward = pending_transitions[i][0]
                         total_r = acc_reward + final_r_p0
-                        scaled_reward = np.clip(total_r / 5000.0, -1.0, 1.0)
                         
-                        # Terminal Transition (legal_mask = 0 is correct here because it's terminal)
+                        # FIX: Scale by 1000.0 (Decent move = 0.2, Huge move = 5.0)
+                        # FIX: Clip to +/- 20 (Allow up to 20,000 points before capping)
+                        scaled_reward = np.clip(total_r / 1000.0, -20.0, 20.0)
+                        
                         agents[0]._replay_buffer.add(dqn.Transition(
                             info_state=old_obs,
                             action=old_act,
@@ -303,9 +329,10 @@ def main():
                     if pending_transitions[i][1] is not None:
                         old_obs, old_act, acc_reward = pending_transitions[i][1]
                         total_r = acc_reward + final_r_p1
-                        scaled_reward = np.clip(total_r / 5000.0, -1.0, 1.0)
                         
-                        agents[1]._replay_buffer.add(dqn.Transition(
+                        scaled_reward = np.clip(total_r / 1000.0, -20.0, 20.0)
+                        
+                        agents[0]._replay_buffer.add(dqn.Transition(
                             info_state=old_obs,
                             action=old_act,
                             reward=scaled_reward,
@@ -317,12 +344,15 @@ def main():
 
             # --- TRAIN ---
             if step > 200: 
-                agents[0]._step_counter += NUM_ENVS
-                agents[1]._step_counter += NUM_ENVS
+                # Decay epsilon (count steps for the shared agent)
+                # We add 2 * NUM_ENVS because the agent played for BOTH sides
+                agents[0]._step_counter += (NUM_ENVS * 2) 
+                
                 if step % LEARN_EVERY == 0:
+                    # Only call learn() on agents[0]. 
+                    # Since agents[1] is the same object, it is automatically updated.
                     l0 = agents[0].learn()
                     if l0 is not None: last_loss = l0.item() if hasattr(l0, 'item') else l0
-                    agents[1].learn()
 
             # --- LOG ---
             if step % EVAL_EVERY == 0:
@@ -335,7 +365,7 @@ def main():
                 eval_env = rl_environment.Environment(GAME_NAME)
                 random_bot = RandomBot(1, num_actions)
                 total_eval_score = 0
-                for _ in range(20):
+                for _ in range(100):
                     ts = eval_env.reset()
                     while not ts.last():
                         pid = ts.observations["current_player"]
@@ -364,8 +394,8 @@ def main():
 
             # --- SAVE ---
             if step % SAVE_EVERY == 0:
-                for idx, agent in enumerate(agents):
-                    agent.save(os.path.join(OUTPUT_DIR, f"agent{idx}_step{step}.pt"))
+                # Only save the shared agent once
+                agents[0].save(os.path.join(OUTPUT_DIR, f"agent0_step{step}.pt"))
                 print(f"Saved checkpoint to {OUTPUT_DIR}")
 
             time_steps = next_time_steps
