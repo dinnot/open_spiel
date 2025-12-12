@@ -163,6 +163,23 @@ void ProYamsState::DoApplyAction(Action action_id) {
   board_[current_player_][col][row] = score;
   cells_filled_++;
 
+  // Retroactive Scratching Logic
+  if (score == 0) {
+    if (row == kRowSS) {
+      // If SS is scratched (0), LS must also be scratched if it has been filled with > 0.
+      int ls_val = board_[current_player_][col][kRowLS];
+      if (ls_val != -1 && ls_val > 0) {
+        board_[current_player_][col][kRowLS] = 0;
+      }
+    } else if (row == kRowLS) {
+      // If LS is scratched (0), SS must also be scratched if it has been filled with > 0.
+      int ss_val = board_[current_player_][col][kRowSS];
+      if (ss_val != -1 && ss_val > 0) {
+        board_[current_player_][col][kRowSS] = 0;
+      }
+    }
+  }
+
   current_player_ = 1 - current_player_;
   rolls_in_turn_ = 0;
   std::fill(dice_.begin(), dice_.end(), 0); 
@@ -170,22 +187,47 @@ void ProYamsState::DoApplyAction(Action action_id) {
 }
 
 std::vector<std::pair<Action, double>> ProYamsState::ChanceOutcomes() const {
-  std::vector<std::pair<Action, double>> outcomes;
-
-  if (phase_ == 0) {
+  static const std::vector<std::pair<Action, double>> kChanceOutcomes0 = []() {
+    std::vector<std::pair<Action, double>> outcomes;
+    outcomes.reserve(720);
     double prob = 1.0 / 720.0;
     for (int i = 0; i < 720; ++i) {
       outcomes.push_back({i, prob});
     }
     return outcomes;
+  }();
+
+  if (phase_ == 0) {
+    return kChanceOutcomes0;
   }
 
   int num_to_roll = 0;
   for (int d : dice_) if (d == 0) num_to_roll++;
 
+  // Optimization: Cached chance outcomes for rolling N dice (1 to 5)
+  // Use a static array of vectors to store them.
+  // Index 0 is unused (rolling 0 dice shouldn't happen here).
+  static const std::vector<std::vector<std::pair<Action, double>>> kRollOutcomes = []() {
+    std::vector<std::vector<std::pair<Action, double>>> all_outcomes(6);
+    for (int n = 1; n <= 5; ++n) {
+      int num_outcomes = std::pow(6, n);
+      double prob = 1.0 / num_outcomes;
+      all_outcomes[n].reserve(num_outcomes);
+      for (int i = 0; i < num_outcomes; ++i) {
+        all_outcomes[n].push_back({i, prob});
+      }
+    }
+    return all_outcomes;
+  }();
+
+  if (num_to_roll > 0 && num_to_roll <= 5) {
+    return kRollOutcomes[num_to_roll];
+  }
+
+  // Fallback for unexpected cases (should not happen in valid state)
+  std::vector<std::pair<Action, double>> outcomes;
   int num_outcomes = std::pow(6, num_to_roll);
   double prob = 1.0 / num_outcomes;
-
   for (int i = 0; i < num_outcomes; ++i) {
     outcomes.push_back({i, prob});
   }

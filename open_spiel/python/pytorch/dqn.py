@@ -170,7 +170,8 @@ class DQN(rl_agent.AbstractAgent):
 
     self._target_q_network = MLP(state_representation_size, self._layer_sizes,
                                  num_actions)
-
+    
+    # print(f"DEBUG: DQN Agent Initialized with loss_str='{loss_str}'")
     if loss_str == "mse":
       self.loss_class = F.mse_loss
     elif loss_str == "huber":
@@ -312,17 +313,22 @@ class DQN(rl_agent.AbstractAgent):
       return None
 
     transitions = self._replay_buffer.sample(self._batch_size)
-    info_states = torch.Tensor([t.info_state for t in transitions])
-    actions = torch.LongTensor([t.action for t in transitions])
-    rewards = torch.Tensor([t.reward for t in transitions])
-    next_info_states = torch.Tensor([t.next_info_state for t in transitions])
-    are_final_steps = torch.Tensor([t.is_final_step for t in transitions])
+    
+    # FIX: Detect the device the network is on (CPU or CUDA)
+    device = next(self._q_network.parameters()).device
+
+    # FIX: Move all batch tensors to that device
+    info_states = torch.Tensor([t.info_state for t in transitions]).to(device)
+    actions = torch.LongTensor([t.action for t in transitions]).to(device)
+    rewards = torch.Tensor([t.reward for t in transitions]).to(device)
+    next_info_states = torch.Tensor([t.next_info_state for t in transitions]).to(device)
+    are_final_steps = torch.Tensor([t.is_final_step for t in transitions]).to(device)
     legal_actions_mask = torch.Tensor(
-        np.array([t.legal_actions_mask for t in transitions]))
+        np.array([t.legal_actions_mask for t in transitions])).to(device)
 
     self._q_values = self._q_network(info_states)
     self._target_q_values = self._target_q_network(next_info_states).detach()
-
+    
     illegal_actions_mask = 1 - legal_actions_mask
     legal_target_q_values = self._target_q_values.masked_fill(
         illegal_actions_mask.bool(), ILLEGAL_ACTION_LOGITS_PENALTY
@@ -331,16 +337,55 @@ class DQN(rl_agent.AbstractAgent):
 
     target = (
         rewards + (1 - are_final_steps) * self._discount_factor * max_next_q)
+    # FIX: Move arange to the same device as the rest
     action_indices = torch.stack([
-        torch.arange(self._q_values.shape[0], dtype=torch.long), actions
+        torch.arange(self._q_values.shape[0], dtype=torch.long).to(device), actions
     ],
                                  dim=0)
     predictions = self._q_values[list(action_indices)]
 
+    # --- DEBUG PROBE START ---
+    # 1. Check Inputs (Observations)
+    if torch.isnan(info_states).any() or torch.isinf(info_states).any():
+        print("❌ CRITICAL: Input 'info_states' contains NaN or Inf!")
+        print("Max Input:", torch.max(info_states).item())
+        print("Min Input:", torch.min(info_states).item())
+        return None
+
+    # 2. Check Network Outputs (Q-Values)
+    if torch.isnan(predictions).any() or torch.isinf(predictions).any():
+        print("❌ CRITICAL: Network Output 'predictions' contains NaN or Inf!")
+        print("Weights Max:", max([p.max().item() for p in self._q_network.parameters()]))
+        return None
+
+    # 3. Check Targets (Rewards + Discount * Next Q)
+    if torch.isnan(target).any() or torch.isinf(target).any():
+        print("❌ CRITICAL: 'target' contains NaN or Inf!")
+        print("Max Reward in Batch:", torch.max(rewards).item())
+        print("Max Next Q:", torch.max(max_next_q).item())
+        return None
+    # --- DEBUG PROBE END ---
+
     loss = self.loss_class(predictions, target)
+
+    # 1. Force Print Loss Type (Just once per run ideally, but okay for debug)
+    # print(f"DEBUG: Using Loss Function: {self.loss_class}")
+
+    loss = self.loss_class(predictions, target)
+
+    # 2. CATCH THE INFINITY HERE
+    if torch.isinf(loss) or torch.isnan(loss):
+        print("\n❌ CRITICAL: Loss became INF/NAN!")
+        print(f"   Loss Function: {self.loss_class}")
+        print(f"   Max Prediction: {predictions.max().item()}")
+        print(f"   Max Target: {target.max().item()}")
+        print(f"   Is Prediction Finite? {torch.isfinite(predictions).all()}")
+        # Force a crash so we stop wasting time
+        raise ValueError("Training halted due to infinite loss.")
 
     self._optimizer.zero_grad()
     loss.backward()
+    torch.nn.utils.clip_grad_norm_(self._q_network.parameters(), max_norm=1.0)
     self._optimizer.step()
 
     return loss
@@ -427,7 +472,7 @@ class DQN(rl_agent.AbstractAgent):
         relative or absolute but the filename should be included. For example:
         optimizer.pt or /path/to/optimizer.pt
     """
-    self._q_network = torch.load(data_path)
-    self._target_q_network = torch.load(data_path)
+    self._q_network = torch.load(data_path, weights_only=False)
+    self._target_q_network = torch.load(data_path, weights_only=False)
     if optimizer_data_path is not None:
       self._optimizer = torch.load(optimizer_data_path)
