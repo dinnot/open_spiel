@@ -41,26 +41,16 @@ enum RowType {
   kRowSS, kRowLS, kRowFH, kRowK, kRowQ, kRow8, kRowY
 };
 
-// --- NEW: Probability Oracle Class ---
-// Pre-computes optimal probabilities for Yams, Full, Straights using DP.
+// --- Probability Oracle ---
 class ProbabilityOracle {
  public:
   static ProbabilityOracle& GetInstance();
-  
-  // Returns vector of 4 probabilities: [ProbYams, ProbFull, ProbLargeStr, ProbSmallStr]
-  // Assumes "Optimal Play" (keeping the best dice to maximize that specific probability).
   std::vector<float> GetProbs(std::vector<int> dice, int rolls_left);
 
  private:
   ProbabilityOracle();
-  
-  // Canonical key for dice (sorted integers, e.g. 11256)
   int GetKey(std::vector<int> dice);
-  
-  // Recursive DP to build the cache
   void ComputeAll();
-  
-  // Cache: [RollsLeft][DiceKey] -> FeatureVector
   std::map<int, std::map<int, std::vector<float>>> cache_;
 };
 
@@ -107,7 +97,6 @@ class ProYamsState : public State {
   std::vector<int> column_coefficients_; 
   std::vector<int> dice_; 
   
-  // Board: [Player][Column][Row]. -1 indicates empty.
   std::array<std::array<std::array<int, kNumRows>, kNumColumns>, kNumPlayers> board_;
   int cells_filled_ = 0;
 };
@@ -119,10 +108,9 @@ class ProYamsGame : public Game {
   std::unique_ptr<State> NewInitialState() const override {
     return std::unique_ptr<State>(new ProYamsState(shared_from_this()));
   }
-  int MaxChanceOutcomes() const override { return 7776; } // 6^5
+  int MaxChanceOutcomes() const override { return 7776; } 
   int NumPlayers() const override { return kNumPlayers; }
   
-  // High scores allowed
   double MinUtility() const override { return -1000000; } 
   double MaxUtility() const override { return 1000000; }
   
@@ -130,8 +118,10 @@ class ProYamsGame : public Game {
 
   int MaxGameLength() const override { return kNumCells * kNumPlayers * 5; } 
   std::vector<int> ObservationTensorShape() const override {
-    // Board (2*6*13) + Dice (5) + Coeffs (6) + Context (3) + ORACLE PROBS (4)
-    return {kNumPlayers * kNumColumns * kNumRows + kNumDice + kNumColumns + 3 + 4};
+    // Board (156) + Dice (5) + Coeffs (6) + Context (3) 
+    // + PROB ORACLE (4) 
+    // + SCORE ORACLE (36) -> [UpperSum, Potential, RawScore] * 6 cols * 2 players
+    return {kNumPlayers * kNumColumns * kNumRows + kNumDice + kNumColumns + 3 + 4 + (kNumPlayers * kNumColumns * 3)};
   }
 };
 
