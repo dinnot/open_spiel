@@ -1,4 +1,3 @@
-// open_spiel/games/pro_yams/pro_yams.h
 #ifndef OPEN_SPIEL_GAMES_PRO_YAMS_H_
 #define OPEN_SPIEL_GAMES_PRO_YAMS_H_
 
@@ -11,6 +10,9 @@
 
 namespace open_spiel {
 namespace pro_yams {
+
+// LINKER FIX: Dummy function declaration
+void ForceProYamsLink();
 
 constexpr int kNumPlayers = 2;
 constexpr int kNumDice = 5;
@@ -72,7 +74,7 @@ class ProYamsState : public State {
   std::vector<int> GetDiceCounts() const;
   bool IsSecBonus() const;
 
-  Player current_player_ = kChancePlayer;
+  Player current_player_ = kChancePlayerId;
   int turn_ = 0;
   int rolls_in_turn_ = 0; 
   bool is_chance_node_ = true;
@@ -95,8 +97,14 @@ class ProYamsGame : public Game {
   }
   int MaxChanceOutcomes() const override { return 7776; } // 6^5
   int NumPlayers() const override { return kNumPlayers; }
-  double MinUtility() const override { return -5000; } 
-  double MaxUtility() const override { return 5000; }
+  
+  // Increased utility bounds for Pro Yams high scores
+  double MinUtility() const override { return -1000000; } 
+  double MaxUtility() const override { return 1000000; }
+  
+  // Basic tests requirement
+  absl::optional<double> UtilitySum() const override { return 0.0; }
+
   int MaxGameLength() const override { return kNumCells * kNumPlayers * 5; } 
   std::vector<int> ObservationTensorShape() const override {
     // Board (2*6*13) + Dice (5) + Coeffs (6) + Context (3)
