@@ -715,7 +715,3 @@ endif()
 add_executable(y_test y/y_test.cc ${OPEN_SPIEL_OBJECTS}
                $<TARGET_OBJECTS:tests>)
 add_test(y_test y_test)
-
-add_executable(pro_yams_scratch_test pro_yams/pro_yams_scratch_test.cc ${OPEN_SPIEL_OBJECTS}
-                             $<TARGET_OBJECTS:tests>)
-add_test(pro_yams_scratch_test pro_yams_scratch_test)
