@@ -2,6 +2,7 @@
 #define OPEN_SPIEL_GAMES_PRO_YAMS_H_
 
 #include <array>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -38,6 +39,29 @@ enum ColumnType {
 enum RowType {
   kRow1 = 0, kRow2, kRow3, kRow4, kRow5, kRow6,
   kRowSS, kRowLS, kRowFH, kRowK, kRowQ, kRow8, kRowY
+};
+
+// --- NEW: Probability Oracle Class ---
+// Pre-computes optimal probabilities for Yams, Full, Straights using DP.
+class ProbabilityOracle {
+ public:
+  static ProbabilityOracle& GetInstance();
+  
+  // Returns vector of 4 probabilities: [ProbYams, ProbFull, ProbLargeStr, ProbSmallStr]
+  // Assumes "Optimal Play" (keeping the best dice to maximize that specific probability).
+  std::vector<float> GetProbs(std::vector<int> dice, int rolls_left);
+
+ private:
+  ProbabilityOracle();
+  
+  // Canonical key for dice (sorted integers, e.g. 11256)
+  int GetKey(std::vector<int> dice);
+  
+  // Recursive DP to build the cache
+  void ComputeAll();
+  
+  // Cache: [RollsLeft][DiceKey] -> FeatureVector
+  std::map<int, std::map<int, std::vector<float>>> cache_;
 };
 
 class ProYamsGame;
@@ -98,17 +122,16 @@ class ProYamsGame : public Game {
   int MaxChanceOutcomes() const override { return 7776; } // 6^5
   int NumPlayers() const override { return kNumPlayers; }
   
-  // Increased utility bounds for Pro Yams high scores
+  // High scores allowed
   double MinUtility() const override { return -1000000; } 
   double MaxUtility() const override { return 1000000; }
   
-  // Basic tests requirement
   absl::optional<double> UtilitySum() const override { return 0.0; }
 
   int MaxGameLength() const override { return kNumCells * kNumPlayers * 5; } 
   std::vector<int> ObservationTensorShape() const override {
-    // Board (2*6*13) + Dice (5) + Coeffs (6) + Context (3)
-    return {kNumPlayers * kNumColumns * kNumRows + kNumDice + kNumColumns + 3};
+    // Board (2*6*13) + Dice (5) + Coeffs (6) + Context (3) + ORACLE PROBS (4)
+    return {kNumPlayers * kNumColumns * kNumRows + kNumDice + kNumColumns + 3 + 4};
   }
 };
 

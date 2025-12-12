@@ -6,6 +6,7 @@
 #include <vector>
 #include <iomanip>
 #include <sstream>
+#include <map>
 
 #include "open_spiel/game_parameters.h"
 #include "open_spiel/spiel_utils.h"
@@ -13,7 +14,6 @@
 namespace open_spiel {
 namespace pro_yams {
 
-// LINKER FIX: Dummy function definition
 void ForceProYamsLink() {}
 
 namespace {
@@ -39,6 +39,33 @@ std::vector<int> DecodePermutation(int index, std::vector<int> items) {
     available.erase(available.begin() + selected_idx);
   }
   return result;
+}
+
+// Recursively generate all dice combinations (1,1,1,1,1 to 6,6,6,6,6)
+void GenerateDiceCombinations(std::vector<int>& current, int start_face, int depth, 
+                              std::vector<std::vector<int>>& out_combinations) {
+  if (depth == 0) {
+    out_combinations.push_back(current);
+    return;
+  }
+  for (int f = start_face; f <= 6; ++f) {
+    current.push_back(f);
+    GenerateDiceCombinations(current, f, depth - 1, out_combinations);
+    current.pop_back();
+  }
+}
+
+// Generate all outcomes of rolling N dice
+void GenerateRollOutcomes(int n, std::vector<int>& current, std::vector<std::vector<int>>& out) {
+    if (n == 0) {
+        out.push_back(current);
+        return;
+    }
+    for (int i=1; i<=6; ++i) {
+        current.push_back(i);
+        GenerateRollOutcomes(n-1, current, out);
+        current.pop_back();
+    }
 }
 
 const GameType kGameType{
@@ -68,8 +95,123 @@ REGISTER_SPIEL_GAME(kGameType, Factory);
 
 }  // namespace
 
+// --- ProbabilityOracle Implementation ---
+
+ProbabilityOracle& ProbabilityOracle::GetInstance() {
+  static ProbabilityOracle instance;
+  return instance;
+}
+
+int ProbabilityOracle::GetKey(std::vector<int> dice) {
+  std::vector<int> sorted = dice;
+  std::sort(sorted.begin(), sorted.end());
+  int key = 0;
+  for (int d : sorted) key = key * 10 + d;
+  return key;
+}
+
+ProbabilityOracle::ProbabilityOracle() {
+  ComputeAll();
+}
+
+void ProbabilityOracle::ComputeAll() {
+  // 1. Generate all 252 canonical dice states (sorted)
+  std::vector<std::vector<int>> all_states;
+  std::vector<int> buffer;
+  GenerateDiceCombinations(buffer, 1, 5, all_states);
+
+  // 2. Initialize 0-rolls-left (Immediate Evaluation)
+  // Indices: 0=Yams, 1=Full, 2=LargeStr, 3=SmallStr
+  for (const auto& dice : all_states) {
+    std::vector<int> counts(7, 0);
+    for (int d : dice) counts[d]++;
+    
+    float is_yams = 0.0f;
+    float is_full = 0.0f;
+    float is_large = 0.0f;
+    float is_small = 0.0f;
+
+    // Yams
+    for (int c : counts) if (c == 5) is_yams = 1.0f;
+    
+    // Full House
+    bool has3 = false, has2 = false;
+    for (int c : counts) { if (c==3) has3=true; if (c==2) has2=true; if(c==5) {has3=true; has2=true;} }
+    if (has3 && has2) is_full = 1.0f;
+
+    // Straights (Pro Yams Rules: 5 consecutive)
+    if (counts[1] && counts[2] && counts[3] && counts[4] && counts[5]) is_small = 1.0f;
+    if (counts[2] && counts[3] && counts[4] && counts[5] && counts[6]) is_large = 1.0f;
+
+    cache_[0][GetKey(dice)] = {is_yams, is_full, is_large, is_small};
+  }
+
+  // Pre-generate roll outcomes for 1..5 dice
+  std::vector<std::vector<std::vector<int>>> roll_outcomes(6);
+  for(int i=1; i<=5; ++i) {
+      std::vector<int> buf;
+      GenerateRollOutcomes(i, buf, roll_outcomes[i]);
+  }
+
+  // 3. DP for Rolls Left = 1 and 2
+  for (int r = 1; r <= 2; ++r) {
+    for (const auto& dice : all_states) {
+        // We want to maximize prob for EACH category independently
+        std::vector<float> max_probs = {0.0f, 0.0f, 0.0f, 0.0f};
+
+        // Iterate over all 32 subsets of dice to keep
+        // (0 = keep none, 31 = keep all)
+        for (int i = 0; i < 32; ++i) {
+            std::vector<int> kept;
+            for (int bit = 0; bit < 5; ++bit) {
+                if ((i >> bit) & 1) kept.push_back(dice[bit]);
+            }
+
+            int n_roll = 5 - kept.size();
+            std::vector<float> current_sum = {0.0f, 0.0f, 0.0f, 0.0f};
+            float count = 0.0f;
+
+            if (n_roll == 0) {
+                current_sum = cache_[r-1][GetKey(kept)];
+                count = 1.0f;
+            } else {
+                const auto& outcomes = roll_outcomes[n_roll];
+                count = (float)outcomes.size();
+                for (const auto& roll : outcomes) {
+                    std::vector<int> next_hand = kept;
+                    next_hand.insert(next_hand.end(), roll.begin(), roll.end());
+                    int next_key = GetKey(next_hand);
+                    const auto& next_probs = cache_[r-1][next_key];
+                    for(int k=0; k<4; ++k) current_sum[k] += next_probs[k];
+                }
+            }
+
+            // Average the outcomes for this 'keep' strategy
+            for(int k=0; k<4; ++k) {
+                float p = current_sum[k] / count;
+                if (p > max_probs[k]) max_probs[k] = p; // Maximize prob independently
+            }
+        }
+        cache_[r][GetKey(dice)] = max_probs;
+    }
+  }
+}
+
+std::vector<float> ProbabilityOracle::GetProbs(std::vector<int> dice, int rolls_left) {
+    int key = GetKey(dice);
+    if (cache_.count(rolls_left) && cache_[rolls_left].count(key)) {
+        return cache_[rolls_left][key];
+    }
+    return {0.0f, 0.0f, 0.0f, 0.0f}; 
+}
+
+// --- End Oracle ---
+
 ProYamsGame::ProYamsGame(const GameParameters& params)
-    : Game(kGameType, params) {}
+    : Game(kGameType, params) {
+    // Ensure Oracle is built at startup
+    ProbabilityOracle::GetInstance();
+}
 
 ProYamsState::ProYamsState(std::shared_ptr<const Game> game)
     : State(game), dice_(kNumDice, 0) {
@@ -109,7 +251,6 @@ std::vector<Action> ProYamsState::LegalActions() const {
   // 2. Reroll Actions
   if (rolls_in_turn_ < 3) {
     bool can_reroll = true;
-    
     if (rolls_in_turn_ == 2) {
       bool has_non_turbo_moves = false;
       for (int c = 0; c < kNumColumns; ++c) {
@@ -163,20 +304,13 @@ void ProYamsState::DoApplyAction(Action action_id) {
   board_[current_player_][col][row] = score;
   cells_filled_++;
 
-  // Retroactive Scratching Logic
   if (score == 0) {
     if (row == kRowSS) {
-      // If SS is scratched (0), LS must also be scratched if it has been filled with > 0.
       int ls_val = board_[current_player_][col][kRowLS];
-      if (ls_val != -1 && ls_val > 0) {
-        board_[current_player_][col][kRowLS] = 0;
-      }
+      if (ls_val != -1 && ls_val > 0) board_[current_player_][col][kRowLS] = 0;
     } else if (row == kRowLS) {
-      // If LS is scratched (0), SS must also be scratched if it has been filled with > 0.
       int ss_val = board_[current_player_][col][kRowSS];
-      if (ss_val != -1 && ss_val > 0) {
-        board_[current_player_][col][kRowSS] = 0;
-      }
+      if (ss_val != -1 && ss_val > 0) board_[current_player_][col][kRowSS] = 0;
     }
   }
 
@@ -204,9 +338,6 @@ std::vector<std::pair<Action, double>> ProYamsState::ChanceOutcomes() const {
   int num_to_roll = 0;
   for (int d : dice_) if (d == 0) num_to_roll++;
 
-  // Optimization: Cached chance outcomes for rolling N dice (1 to 5)
-  // Use a static array of vectors to store them.
-  // Index 0 is unused (rolling 0 dice shouldn't happen here).
   static const std::vector<std::vector<std::pair<Action, double>>> kRollOutcomes = []() {
     std::vector<std::vector<std::pair<Action, double>>> all_outcomes(6);
     for (int n = 1; n <= 5; ++n) {
@@ -224,7 +355,6 @@ std::vector<std::pair<Action, double>> ProYamsState::ChanceOutcomes() const {
     return kRollOutcomes[num_to_roll];
   }
 
-  // Fallback for unexpected cases (should not happen in valid state)
   std::vector<std::pair<Action, double>> outcomes;
   int num_outcomes = std::pow(6, num_to_roll);
   double prob = 1.0 / num_outcomes;
@@ -349,10 +479,7 @@ int ProYamsState::CalculateScore(int col, int row, const std::vector<int>& dice)
       }
   }
 
-  // --- Strict Zeroing Logic ---
-  if (row == kRowLS && board_[CurrentPlayer()][col][kRowSS] == 0) {
-    return 0;
-  }
+  if (row == kRowLS && board_[CurrentPlayer()][col][kRowSS] == 0) return 0;
   
   if (!is_sec) {
       if ((row == kRowSS || row == kRowLS) && raw_score < 20) return 0;
@@ -540,6 +667,15 @@ void ProYamsState::ObservationTensor(Player player, absl::Span<float> values) co
   values[offset++] = static_cast<float>(rolls_in_turn_) / 3.0f;
   values[offset++] = static_cast<float>(phase_);
   values[offset++] = (current_player_ == player) ? 1.0f : 0.0f;
+
+  // --- NEW: Oracle Features ---
+  // Calculates probability of getting [Yams, Full, Large, Small] with optimal play
+  // Rolls left: 0, 1, or 2
+  int rolls_left = (rolls_in_turn_ > 2) ? 0 : (2 - rolls_in_turn_);
+  auto probs = ProbabilityOracle::GetInstance().GetProbs(dice_, rolls_left);
+  for (float p : probs) {
+      values[offset++] = p;
+  }
 }
 
 std::unique_ptr<State> ProYamsState::Clone() const {
